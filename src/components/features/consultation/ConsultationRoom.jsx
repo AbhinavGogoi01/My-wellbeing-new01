@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useLocation } from 'react-router-dom';
-import { auth, db } from '../../Auth/firebase';
+import { auth, db, storage } from '../../Auth/firebase';
 import { 
   collection, 
   doc, 
@@ -13,8 +13,10 @@ import {
   updateDoc,
   serverTimestamp 
 } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import SignalingService from '../../../services/BulletproofSignalingService';
 import './ConsultationRoom.css';
+import './file-upload.css';
 
 const ConsultationRoom = () => {
   const { roomId } = useParams();
@@ -34,6 +36,12 @@ const ConsultationRoom = () => {
   const [connectionState, setConnectionState] = useState('new');
   const [isConnected, setIsConnected] = useState(false);
   const [cameraError, setCameraError] = useState('');
+  const [hasVideo, setHasVideo] = useState(false);
+  const [hasAudio, setHasAudio] = useState(false);
+  const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [fileToUpload, setFileToUpload] = useState(null);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -46,6 +54,7 @@ const ConsultationRoom = () => {
   const initTimeoutRef = useRef(null);
   const offerTimeoutRef = useRef(null);
   const isCleaningUp = useRef(false);
+  const fileInputRef = useRef(null);
 
   const scrollToBottom = useCallback(() => {
     if (messagesEndRef.current) {
@@ -55,77 +64,105 @@ const ConsultationRoom = () => {
 
   // Enhanced camera access with better error handling
   const requestUserMedia = useCallback(async () => {
-    console.log('🎥 Requesting user media...');
-    
-    const constraintOptions = [
-      // Try HD quality first
-      {
-        video: { 
-          width: { ideal: 1280 }, 
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
+    try {
+      setConnectionState('requesting-media');
+      console.log('🎥 Requesting user media...');
+      
+      const constraintOptions = [
+        // Try HD quality first
+        {
+          video: { 
+            width: { ideal: 1280 }, 
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
+          },
+          audio: { 
+            echoCancellation: true, 
+            noiseSuppression: true,
+            autoGainControl: true
+          }
         },
-        audio: { 
-          echoCancellation: true, 
-          noiseSuppression: true,
-          autoGainControl: true
+        // Fallback to basic quality
+        {
+          video: { 
+            width: { ideal: 640 }, 
+            height: { ideal: 480 },
+            frameRate: { ideal: 24 }
+          },
+          audio: { 
+            echoCancellation: true, 
+            noiseSuppression: true
+          }
+        },
+        // Minimum quality
+        {
+          video: { 
+            width: 320, 
+            height: 240,
+            frameRate: 15
+          },
+          audio: true
+        },
+        {
+          video: true,
+          audio: false
+        },
+        // Audio only as last resort
+        {
+          video: false,
+          audio: true
         }
-      },
-      // Fallback to basic quality
-      {
-        video: { 
-          width: { ideal: 640 }, 
-          height: { ideal: 480 },
-          frameRate: { ideal: 24 }
-        },
-        audio: { 
-          echoCancellation: true, 
-          noiseSuppression: true
-        }
-      },
-      // Minimum quality
-      {
-        video: { 
-          width: 320, 
-          height: 240,
-          frameRate: 15
-        },
-        audio: true
-      },
-      // Audio only as last resort
-      {
-        video: false,
-        audio: true
-      }
-    ];
+      ];
 
-    let lastError = null;
-    for (let i = 0; i < constraintOptions.length; i++) {
-      try {
-        console.log(`🔄 Trying media constraint option ${i + 1}:`, constraintOptions[i]);
-        
-        const stream = await navigator.mediaDevices.getUserMedia(constraintOptions[i]);
-        
-        console.log('✅ Got media stream:', {
-          id: stream.id,
-          videoTracks: stream.getVideoTracks().length,
-          audioTracks: stream.getAudioTracks().length,
-          active: stream.active
-        });
-
-        return stream;
-      } catch (err) {
-        console.warn(`⚠️ Failed with constraint option ${i + 1}:`, err.message);
-        lastError = err;
-        
-        // Break early if permission is denied
-        if (err.name === 'NotAllowedError') {
-          throw new Error('Camera/microphone access denied by user');
+      let lastError = null;
+      let stream = null;
+      
+      for (let i = 0; i < constraintOptions.length; i++) {
+        try {
+          console.log(`🔄 Trying media constraint option ${i + 1}:`, constraintOptions[i]);
+          
+          stream = await navigator.mediaDevices.getUserMedia(constraintOptions[i]);
+          
+          console.log('✅ Got media stream:', {
+            id: stream.id,
+            videoTracks: stream.getVideoTracks().length,
+            audioTracks: stream.getAudioTracks().length,
+            active: stream.active
+          });
+          
+          break;
+        } catch (err) {
+          console.warn(`⚠️ Failed with constraint option ${i + 1}:`, err.message);
+          lastError = err;
+          
+          // Break early if permission is denied
+          if (err.name === 'NotAllowedError') {
+            throw new Error('Camera/microphone access denied by user');
+          }
         }
       }
+      
+      if (!stream) {
+        throw lastError || new Error('Failed to access media devices');
+      }
+      
+      // Set up local video
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      
+      setHasVideo(stream.getVideoTracks().length > 0);
+      setHasAudio(stream.getAudioTracks().length > 0);
+      setConnectionState('media-ready');
+      console.log('✅ Media access granted');
+      
+      return stream;
+    } catch (error) {
+      console.error('❌ Media access denied:', error);
+      setConnectionState('media-denied');
+      setError(`Camera access denied: ${error.message}`);
+      throw error;
     }
-    
-    throw lastError || new Error('Failed to access media devices');
   }, []);
 
   // FIXED: Simplified and more reliable video setup
@@ -288,7 +325,9 @@ const ConsultationRoom = () => {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' }
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
       ],
       iceCandidatePoolSize: 10
     };
@@ -356,6 +395,11 @@ const ConsultationRoom = () => {
       if (event.streams && event.streams[0]) {
         console.log('📥 Setting remote stream');
         setRemoteStream(event.streams[0]);
+        setHasRemoteVideo(true);
+        
+        if (remoteVideoRef.current) {
+          setupVideoElement(remoteVideoRef.current, event.streams[0], false);
+        }
       }
     };
 
@@ -379,7 +423,7 @@ const ConsultationRoom = () => {
     };
 
     return pc;
-  }, [localStream, handleConnectionRecovery]);
+  }, [localStream, handleConnectionRecovery, setupVideoElement]);
 
   const handleSignal = useCallback(async (data) => {
     console.log('📨 Handling signal:', data.type || 'ice-candidate');
@@ -411,10 +455,16 @@ const ConsultationRoom = () => {
           answer: pc.localDescription
         });
         
+        // Process any pending candidates
+        await processPendingCandidates();
+        
       } else if (data.answer) {
         console.log('📥 Received answer');
         await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         hasRemoteDescription.current = true;
+        
+        // Process any pending candidates
+        await processPendingCandidates();
         
       } else if (data.candidate) {
         console.log('📥 Received ICE candidate');
@@ -437,27 +487,11 @@ const ConsultationRoom = () => {
         }
       }
       
-      // Add any pending candidates
-      if (hasRemoteDescription.current && pendingCandidates.current.length > 0) {
-        console.log('📥 Adding pending candidates:', pendingCandidates.current.length);
-        
-        const candidates = pendingCandidates.current;
-        pendingCandidates.current = [];
-        
-        for (const candidate of candidates) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
-          } catch (err) {
-            console.warn('❌ Error adding pending candidate:', err);
-          }
-        }
-      }
-      
     } catch (err) {
       console.error('❌ Error handling signal:', err);
       setError('Connection error. Please try again.');
     }
-  }, []);
+  }, [processPendingCandidates]);
 
   const retryCamera = useCallback(async () => {
     console.log('🔄 Retrying camera access...');
@@ -522,13 +556,21 @@ const ConsultationRoom = () => {
       const isDoctor = auth.currentUser?.uid === consultationData.doctorId;
       if (isDoctor) {
         setLoadingStatus('Initiating call...');
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
         
-        SignalingService.sendSignal({
-          type: 'offer',
-          offer: pc.localDescription
-        });
+        setTimeout(async () => {
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            
+            SignalingService.sendSignal({
+              type: 'offer',
+              offer: pc.localDescription
+            });
+          } catch (err) {
+            console.error('❌ Error creating offer:', err);
+            setError('Failed to initiate call: ' + err.message);
+          }
+        }, 1000);
       } else {
         setLoadingStatus('Waiting for doctor...');
         console.log('🤒 Patient - waiting for offer...');
@@ -680,21 +722,87 @@ const ConsultationRoom = () => {
     return cleanup;
   }, [cleanup]);
 
-  const sendMessage = async () => {
-    if (!newMessage.trim() || !roomId) return;
+  const handleFileSelect = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    if (file.size > 5 * 1024 * 1024) {
+      setError(`File ${file.name} is too large. Maximum size is 5MB.`);
+      return;
+    }
+    
+    setFileToUpload(file);
+  };
 
+  const uploadFile = async () => {
+    if (!fileToUpload || !roomId) return;
+    
+    setUploadingFile(true);
+    setUploadProgress(0);
+    
     try {
+      // Create a reference to the file location
+      const fileRef = ref(storage, `consultations/${roomId}/chat/${Date.now()}_${fileToUpload.name}`);
+      
+      await uploadBytes(fileRef, fileToUpload);
+      setUploadProgress(50);
+      
+      const downloadURL = await getDownloadURL(fileRef);
+      setUploadProgress(100);
+      
+      const isImage = fileToUpload.type.startsWith('image/');
+      const isPdf = fileToUpload.type === 'application/pdf';
+      
       await addDoc(collection(db, 'consultationMessages'), {
         consultationId: roomId,
-        text: newMessage.trim(),
+        text: isImage ? '📷 Image' : isPdf ? '📄 PDF Document' : '📎 File',
         senderId: auth.currentUser?.uid,
         senderName: auth.currentUser?.displayName || 'Anonymous',
-        timestamp: serverTimestamp()
+        timestamp: serverTimestamp(),
+        fileUrl: downloadURL,
+        fileName: fileToUpload.name,
+        fileType: fileToUpload.type,
+        isFile: true,
+        isImage,
+        isPdf
       });
+      
+      setFileToUpload(null);
+      
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    } catch (err) {
+      console.error('Error uploading file:', err);
+      setError('Failed to upload file: ' + err.message);
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!newMessage.trim() && !fileToUpload) return;
+    if (!roomId) return;
+
+    try {
+      if (fileToUpload) {
+        await uploadFile();
+      }
+      
+      if (newMessage.trim()) {
+        await addDoc(collection(db, 'consultationMessages'), {
+          consultationId: roomId,
+          text: newMessage.trim(),
+          senderId: auth.currentUser?.uid,
+          senderName: auth.currentUser?.displayName || 'Anonymous',
+          timestamp: serverTimestamp()
+        });
+      }
       
       setNewMessage('');
     } catch (err) {
       console.error('Error sending message:', err);
+      setError('Failed to send message: ' + err.message);
     }
   };
 
@@ -883,7 +991,37 @@ const ConsultationRoom = () => {
                   }`}
                 >
                   <div className="message-content">
-                    <p>{message.text}</p>
+                    {message.isFile ? (
+                      <>
+                        {message.isImage ? (
+                          <div className="image-preview">
+                            <a href={message.fileUrl} target="_blank" rel="noopener noreferrer">
+                              <img src={message.fileUrl} alt={message.fileName} style={{ maxWidth: '100%', maxHeight: '200px', borderRadius: '8px' }} />
+                            </a>
+                          </div>
+                        ) : message.isPdf ? (
+                          <div className="pdf-preview">
+                            <a href={message.fileUrl} target="_blank" rel="noopener noreferrer" className="file-link">
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ fontSize: '24px' }}>📄</span>
+                                <span>{message.fileName}</span>
+                              </div>
+                            </a>
+                          </div>
+                        ) : (
+                          <div className="file-preview">
+                            <a href={message.fileUrl} target="_blank" rel="noopener noreferrer" className="file-link">
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ fontSize: '24px' }}>📎</span>
+                                <span>{message.fileName}</span>
+                              </div>
+                            </a>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <p>{message.text}</p>
+                    )}
                     <span className="timestamp">
                       {message.timestamp?.toDate?.()?.toLocaleTimeString() || 'Sending...'}
                     </span>
@@ -900,9 +1038,45 @@ const ConsultationRoom = () => {
                 onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                 placeholder="Type a message..."
               />
-              <button onClick={sendMessage} disabled={!newMessage.trim()}>
-                Send
-              </button>
+              {uploadingFile && (
+                <div className="upload-progress">
+                  <div 
+                    className="progress-bar" 
+                    style={{ width: `${uploadProgress}%` }}
+                  ></div>
+                  <span>{uploadProgress}%</span>
+                </div>
+              )}
+              <div className="message-actions">
+                <label htmlFor="file-upload" className="file-upload-label">
+                  📎
+                  <input
+                    id="file-upload"
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileSelect}
+                    style={{ display: 'none' }}
+                    accept="image/*,.pdf,.doc,.docx"
+                  />
+                </label>
+                {fileToUpload && (
+                  <div className="selected-file">
+                    <span>{fileToUpload.name}</span>
+                    <button 
+                      onClick={() => setFileToUpload(null)}
+                      className="remove-file"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+                <button 
+                  onClick={sendMessage} 
+                  disabled={!newMessage.trim() && !fileToUpload}
+                >
+                  Send
+                </button>
+              </div>
             </div>
           </div>
         </>
