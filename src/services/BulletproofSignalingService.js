@@ -66,27 +66,32 @@ class BulletproofSignalingService {
         }
 
         this.socket = io(this.serverUrl, {
-          transports: ['websocket', 'polling'],
-          timeout: this.attemptTimeoutDuration, // Socket.IO's own timeout for the connection attempt
+          transports: ['polling', 'websocket'], // Match server's transport order
+          timeout: 20000, // Increased timeout for initial connection
           forceNew: true, // Ensures a new connection, good for retries
           reconnection: false, // Disable Socket.IO's automatic reconnection; we manage retries.
           query: {
             roomId,
             userId,
           },
+          extraHeaders: {
+            "User-Agent": navigator.userAgent, // Help with debugging
+          }
         });
 
         let attemptTimer = setTimeout(() => {
           console.warn(`⏰ Attempt ${this.connectionAttempts} timed out after ${this.attemptTimeoutDuration / 1000}s.`);
           if (this.socket) {
+            console.log('🔄 Forcing disconnect due to timeout');
             this.socket.disconnect(); // Trigger cleanup and connect_error if it hasn't fired
+            
+            setTimeout(() => {
+              if (this.isConnecting && this.connectionAttempts < this.maxAttempts) {
+                console.log('🔄 Timeout recovery - trying next attempt');
+                attemptConnection();
+              }
+            }, 500);
           }
-          // connect_error handler will call attemptConnection() or reject if max attempts reached
-          // If connect_error is not triggered by disconnect, we might need to call attemptConnection here.
-          // However, socket.disconnect() should ideally lead to connect_error or a clean close.
-          // To be safe, if socket still exists, call attemptConnection.
-          // This timeout primarily guards against hangs where connect_error isn't fired.
-          // The 'timeout' option in io() should make connect_error fire.
         }, this.attemptTimeoutDuration + 1000); // Slightly longer than socket.io timeout
 
         this.socket.on('connect', () => {

@@ -559,13 +559,42 @@ const ConsultationRoom = () => {
       setLoadingStatus('Connecting to server...');
       console.log('🔐 Current user auth state:', auth.currentUser?.uid ? 'Authenticated' : 'Not authenticated');
       console.log('📡 Attempting WebSocket connection to port 3001...');
+      
       try {
+        const networkInfo = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (networkInfo) {
+          console.log('🌐 Network info:', {
+            type: networkInfo.type,
+            effectiveType: networkInfo.effectiveType,
+            downlink: networkInfo.downlink,
+            rtt: networkInfo.rtt,
+            saveData: networkInfo.saveData
+          });
+        }
+      } catch (e) {
+        console.log('Network info not available');
+      }
+      
+      // Try connecting to signaling server
+      try {
+        console.log('🔄 Connection attempt starting with debug info:', SignalingService.getDebugInfo());
         await SignalingService.connect(roomId);
         console.log('✅ Successfully connected to signaling server');
       } catch (connectionError) {
         console.error('❌ SignalingService connection failed:', connectionError);
-        setError(`Failed to connect to signaling server: ${connectionError.message}. Please ensure the server is running on port 3001.`);
-        throw connectionError;
+        console.log('🔍 Connection debug info:', SignalingService.getDebugInfo());
+        
+        setError(`Failed to connect to signaling server: ${connectionError.message}. 
+          Troubleshooting steps:
+          1. Ensure server is running on port 3001
+          2. Check firewall settings for WebSocket connections
+          3. Try refreshing the page
+          
+          Switching to chat-only mode...`);
+        
+        setIsChatMode(true);
+        setLoadingStatus('Chat-only mode activated');
+        return; // Exit early but don't throw to allow chat functionality
       }
       
       if (isCleaningUp.current) return;
