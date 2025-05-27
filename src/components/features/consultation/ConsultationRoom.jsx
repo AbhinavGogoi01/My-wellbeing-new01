@@ -522,6 +522,23 @@ const ConsultationRoom = () => {
     setLoading(true);
     setLoadingStatus('Initializing video call...');
     
+    setLoadingStatus('Checking server availability...');
+    try {
+      console.log('🔍 Checking if signaling server is reachable at http://localhost:3001/health');
+      const response = await fetch('http://localhost:3001/health');
+      if (!response.ok) {
+        throw new Error('Signaling server health check failed');
+      }
+      const serverInfo = await response.json();
+      console.log('✅ Signaling server is reachable:', serverInfo);
+    } catch (healthError) {
+      console.error('❌ Signaling server health check failed:', healthError);
+      setError('Signaling server is not running. Please start with: node server.js');
+      setLoading(false);
+      isInitializing.current = false;
+      return;
+    }
+    
     try {
       // Request camera/mic access
       setLoadingStatus('Requesting camera access...');
@@ -540,7 +557,16 @@ const ConsultationRoom = () => {
       
       // Connect to signaling server
       setLoadingStatus('Connecting to server...');
-      await SignalingService.connect(roomId);
+      console.log('🔐 Current user auth state:', auth.currentUser?.uid ? 'Authenticated' : 'Not authenticated');
+      console.log('📡 Attempting WebSocket connection to port 3001...');
+      try {
+        await SignalingService.connect(roomId);
+        console.log('✅ Successfully connected to signaling server');
+      } catch (connectionError) {
+        console.error('❌ SignalingService connection failed:', connectionError);
+        setError(`Failed to connect to signaling server: ${connectionError.message}. Please ensure the server is running on port 3001.`);
+        throw connectionError;
+      }
       
       if (isCleaningUp.current) return;
       
@@ -588,8 +614,10 @@ const ConsultationRoom = () => {
       
     } catch (err) {
       console.error('❌ WebRTC initialization error:', err);
-      setError('Failed to initialize video call: ' + err.message);
+      setError(`Video consultation failed: ${err.message}. Switching to chat-only mode.`);
       setCameraError(err.message);
+      setIsChatMode(true);
+      setLoadingStatus('Chat-only mode activated');
       setLoading(false);
     } finally {
       isInitializing.current = false;

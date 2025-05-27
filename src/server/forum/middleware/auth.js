@@ -4,7 +4,6 @@ const path = require('path');
 
 // Initialize Firebase Admin SDK if not already initialized
 if (!admin.apps.length) {
-  // Use the service account file that exists in the config directory
   const serviceAccount = require('../../config/firebase-service-account.json');
   
   admin.initializeApp({
