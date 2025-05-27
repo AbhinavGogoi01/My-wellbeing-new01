@@ -32,7 +32,7 @@ const ConsultationRoom = () => {
   const [remoteStream, setRemoteStream] = useState(null);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const [isChatMode] = useState(consultationType === 'chat');
+  const [isChatMode, setIsChatMode] = useState(consultationType === 'chat');
   const [connectionState, setConnectionState] = useState('new');
   const [isConnected, setIsConnected] = useState(false);
   const [cameraError, setCameraError] = useState('');
