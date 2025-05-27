@@ -14,7 +14,8 @@ import {
   serverTimestamp 
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import SignalingService from '../../../services/BulletproofSignalingService';
+import Peer from 'peerjs';
+import io from 'socket.io-client';
 import './ConsultationRoom.css';
 import './file-upload.css';
 
@@ -46,7 +47,9 @@ const ConsultationRoom = () => {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const messagesEndRef = useRef(null);
-  const peerConnectionRef = useRef(null);
+  const peerRef = useRef(null);
+  const socketRef = useRef(null);
+  const peersRef = useRef({});
   const isInitializing = useRef(false);
   const pendingCandidates = useRef([]);
   const hasRemoteDescription = useRef(false);
@@ -236,9 +239,6 @@ const ConsultationRoom = () => {
     if (initTimeoutRef.current) {
       clearTimeout(initTimeoutRef.current);
     }
-    if (offerTimeoutRef.current) {
-      clearTimeout(offerTimeoutRef.current);
-    }
     
     // Stop local stream
     if (localStream) {
@@ -256,22 +256,34 @@ const ConsultationRoom = () => {
       remoteVideoRef.current.srcObject = null;
     }
     
-    // Close peer connection
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
+    // Close PeerJS connections
+    if (peerRef.current) {
+      console.log('🔌 Closing PeerJS connection');
+      peerRef.current.destroy();
+      peerRef.current = null;
     }
     
-    // Disconnect from signaling
-    SignalingService.disconnect();
+    // Close all peer connections
+    Object.values(peersRef.current).forEach(call => {
+      if (call) {
+        console.log('📞 Closing call');
+        call.close();
+      }
+    });
+    peersRef.current = {};
+    
+    // Disconnect Socket.IO
+    if (socketRef.current) {
+      console.log('🔌 Disconnecting Socket.IO');
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
     
     // Reset state
     setLocalStream(null);
     setRemoteStream(null);
     setIsConnected(false);
     setConnectionState('new');
-    pendingCandidates.current = [];
-    hasRemoteDescription.current = false;
     
     isCleaningUp.current = false;
     console.log('✅ Cleanup complete');
@@ -511,7 +523,7 @@ const ConsultationRoom = () => {
   }, [cleanup, consultation]);
 
   const initializeWebRTC = useCallback(async (consultationData) => {
-    console.log('🚀 Initializing WebRTC...');
+    console.log('🚀 Initializing WebRTC with PeerJS...');
     
     if (isInitializing.current) {
       console.log('⏳ Already initializing...');
@@ -575,16 +587,37 @@ const ConsultationRoom = () => {
         console.log('Network info not available');
       }
       
-      // Try connecting to signaling server
-      try {
-        console.log('🔄 Connection attempt starting with debug info:', SignalingService.getDebugInfo());
-        await SignalingService.connect(roomId);
-        console.log('✅ Successfully connected to signaling server');
-      } catch (connectionError) {
-        console.error('❌ SignalingService connection failed:', connectionError);
-        console.log('🔍 Connection debug info:', SignalingService.getDebugInfo());
-        
-        setError(`Failed to connect to signaling server: ${connectionError.message}. 
+      // Create PeerJS instance with debug logging
+      setLoadingStatus('Creating PeerJS connection...');
+      const myPeer = new Peer(undefined, {
+        debug: 3, // Log everything for debugging
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' }
+          ]
+        }
+      });
+      peerRef.current = myPeer;
+      
+      // Connect to Socket.IO signaling server
+      const socket = io('http://localhost:3001', {
+        transports: ['polling', 'websocket'], // Match server's transport order
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
+      });
+      socketRef.current = socket;
+      
+      // Set up socket event listeners
+      socket.on('connect', () => {
+        console.log('✅ Socket.IO connected successfully');
+      });
+      
+      socket.on('connect_error', (error) => {
+        console.error('❌ Socket.IO connection error:', error);
+        setError(`Failed to connect to signaling server: ${error.message}. 
           Troubleshooting steps:
           1. Ensure server is running on port 3001
           2. Check firewall settings for WebSocket connections
@@ -594,45 +627,104 @@ const ConsultationRoom = () => {
         
         setIsChatMode(true);
         setLoadingStatus('Chat-only mode activated');
-        return; // Exit early but don't throw to allow chat functionality
-      }
+      });
       
-      if (isCleaningUp.current) return;
-      
-      // Create peer connection
-      setLoadingStatus('Setting up connection...');
-      const pc = createPeerConnection();
-      peerConnectionRef.current = pc;
-      
-      // Register signal handler
-      SignalingService.onSignal(handleSignal);
-      
-      // If we're the doctor, send the initial offer
-      const isDoctor = auth.currentUser?.uid === consultationData.doctorId;
-      if (isDoctor) {
-        setLoadingStatus('Initiating call...');
+      // Handle incoming calls
+      myPeer.on('call', (call) => {
+        console.log('📞 Incoming call received');
+        call.answer(stream);
+        setConnectionState('connected');
+        setIsConnected(true);
         
-        setTimeout(async () => {
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            
-            SignalingService.sendSignal({
-              type: 'offer',
-              offer: pc.localDescription
-            });
-          } catch (err) {
-            console.error('❌ Error creating offer:', err);
-            setError('Failed to initiate call: ' + err.message);
+        call.on('stream', (userVideoStream) => {
+          console.log('📹 Remote stream received');
+          if (remoteVideoRef.current) {
+            setupVideoElement(remoteVideoRef.current, userVideoStream, false);
           }
-        }, 1000);
-      } else {
-        setLoadingStatus('Waiting for doctor...');
-        console.log('🤒 Patient - waiting for offer...');
-      }
+          setRemoteStream(userVideoStream);
+          setHasRemoteVideo(userVideoStream.getVideoTracks().length > 0);
+        });
+        
+        call.on('close', () => {
+          console.log('📞 Call closed');
+          setConnectionState('closed');
+          setIsConnected(false);
+        });
+        
+        call.on('error', (error) => {
+          console.error('❌ Call error:', error);
+          setError(`Call error: ${error.message}`);
+        });
+      });
+      
+      // Handle user connections
+      socket.on('user-connected', (userId) => {
+        console.log('👤 User connected:', userId);
+        
+        // If we're the doctor, initiate the call
+        const isDoctor = auth.currentUser?.uid === consultationData.doctorId;
+        if (isDoctor) {
+          setLoadingStatus('Initiating call...');
+          
+          setTimeout(() => {
+            console.log('📞 Initiating call to:', userId);
+            const call = myPeer.call(userId, stream);
+            peersRef.current[userId] = call;
+            
+            call.on('stream', (userVideoStream) => {
+              console.log('📹 Remote stream received');
+              if (remoteVideoRef.current) {
+                setupVideoElement(remoteVideoRef.current, userVideoStream, false);
+              }
+              setRemoteStream(userVideoStream);
+              setHasRemoteVideo(userVideoStream.getVideoTracks().length > 0);
+              setConnectionState('connected');
+              setIsConnected(true);
+            });
+            
+            call.on('close', () => {
+              console.log('📞 Call closed');
+              setConnectionState('closed');
+              setIsConnected(false);
+              delete peersRef.current[userId];
+            });
+            
+            call.on('error', (error) => {
+              console.error('❌ Call error:', error);
+              setError(`Call error: ${error.message}`);
+            });
+          }, 1000);
+        } else {
+          setLoadingStatus('Waiting for doctor to call...');
+        }
+      });
+      
+      // Handle user disconnections
+      socket.on('user-disconnected', (userId) => {
+        console.log('👤 User disconnected:', userId);
+        if (peersRef.current[userId]) {
+          peersRef.current[userId].close();
+          delete peersRef.current[userId];
+        }
+        setConnectionState('closed');
+        setIsConnected(false);
+      });
+      
+      myPeer.on('open', (id) => {
+        console.log('🔑 PeerJS ID received:', id);
+        socket.emit('join-room', roomId, id);
+        setLoadingStatus('Joined room, waiting for connection...');
+      });
+      
+      myPeer.on('error', (error) => {
+        console.error('❌ PeerJS error:', error);
+        setError(`PeerJS error: ${error.message}. Switching to chat-only mode.`);
+        setIsChatMode(true);
+        setLoadingStatus('Chat-only mode activated');
+      });
       
       // Set connection timeout
-      initTimeoutRef.current = setTimeout(() => {
+      const initTimeoutRef = setTimeout(() => {
         if (!isConnected && !isCleaningUp.current) {
           console.log('⏰ Connection timeout');
           setLoading(false);
@@ -652,7 +744,7 @@ const ConsultationRoom = () => {
       isInitializing.current = false;
       setLoading(false);
     }
-  }, [roomId, requestUserMedia, createPeerConnection, handleSignal, isConnected, setupVideoElement]);
+  }, [roomId, requestUserMedia, setupVideoElement, isConnected]);
 
   // Effect for fetching initial data and messages
   useEffect(() => {

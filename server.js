@@ -45,124 +45,34 @@ app.get('/health', (req, res) => {
 io.on('connection', (socket) => {
   console.log(`🔌 New connection: ${socket.id}`);
   
-  let currentRoom = null;
-  
-  // Join room handler
-  socket.on('join-room', async (data) => {
-    try {
-      const { roomId, userId } = data;
-      
-      if (!roomId || !userId) {
-        throw new Error('Missing roomId or userId');
-      }
-      
-      // Leave current room if any
-      if (currentRoom) {
-        await socket.leave(currentRoom);
-        const room = rooms.get(currentRoom);
-        if (room) {
-          room.delete(userId);
-          if (room.size === 0) {
-            rooms.delete(currentRoom);
-          }
-        }
-      }
-      
-      // Join new room
-      await socket.join(roomId);
-      currentRoom = roomId;
-      
-      // Initialize room if doesn't exist
-      if (!rooms.has(roomId)) {
-        rooms.set(roomId, new Set());
-      }
-      rooms.get(roomId).add(userId);
-      
-      // Get other users in room
-      const otherUsers = Array.from(rooms.get(roomId)).filter(id => id !== userId);
-      
-      // Notify user of successful join
-      socket.emit('room-joined', {
-        roomId,
-        userCount: rooms.get(roomId).size,
-        otherUsers
-      });
-      
-      // Notify others in room
-      socket.to(roomId).emit('user-joined', {
-        userId,
-        userCount: rooms.get(roomId).size
-      });
-      
-    } catch (error) {
-      console.error('Room join error:', error);
-      socket.emit('error', {
-        type: 'room-join-error',
-        message: error.message
-      });
-    }
-  });
-  
-  // Signal relay handler
-  socket.on('signal', (data) => {
-    try {
-      const { roomId, fromUserId, toUserId } = data;
-      
-      if (!roomId || !fromUserId) {
-        throw new Error('Missing required signal data');
-      }
-      
-      // Validate user is in room
-      const room = rooms.get(roomId);
-      if (!room || !room.has(fromUserId)) {
-        throw new Error('User not in room');
-      }
-      
-      console.log(`📡 Signal: ${data.type || 'ICE'} from ${fromUserId}`);
-      
-      // Relay signal to room or specific user
-      if (toUserId) {
-        socket.to(roomId).emit('signal', data);
-      } else {
-        socket.to(roomId).emit('signal', data);
-      }
-      
-    } catch (error) {
-      console.error('Signal relay error:', error);
-      socket.emit('error', {
-        type: 'signal-error',
-        message: error.message
-      });
-    }
-  });
-  
-  // Disconnect handler
-  socket.on('disconnect', () => {
-    console.log(`🔌 Disconnection: ${socket.id}`);
+  socket.on('join-room', (roomId, userId) => {
+    console.log(`👤 User ${userId} joining room ${roomId}`);
     
-    if (currentRoom) {
-      const room = rooms.get(currentRoom);
+    socket.join(roomId);
+    
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, new Set());
+    }
+    rooms.get(roomId).add(userId);
+    
+    socket.broadcast.to(roomId).emit('user-connected', userId);
+    console.log(`👤 User ${userId} joined room ${roomId}`);
+    
+    socket.on('disconnect', () => {
+      console.log(`🔌 User ${userId} disconnected from room ${roomId}`);
+      
+      const room = rooms.get(roomId);
       if (room) {
-        // Find userId in room
-        const userId = Array.from(room).find(id => {
-          const sockets = io.sockets.adapter.rooms.get(currentRoom);
-          return sockets && !sockets.has(socket.id);
-        });
-        
-        if (userId) {
-          room.delete(userId);
-          if (room.size === 0) {
-            rooms.delete(currentRoom);
-          }
-          
-          // Notify others in room
-          socket.to(currentRoom).emit('user-left', {
-            userId,
-            userCount: room.size
-          });
+        room.delete(userId);
+        if (room.size === 0) {
+          rooms.delete(roomId);
         }
       }
-    }
+      
+      // Notify others
+      socket.broadcast.to(roomId).emit('user-disconnected', userId);
+      console.log(`👤 User ${userId} left room ${roomId}`);
+    });
   });
   
   // Heartbeat handlers
