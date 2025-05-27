@@ -65,11 +65,33 @@ const ConsultationRoom = () => {
     }
   }, []);
 
-  // Enhanced camera access with better error handling
+  // Enhanced camera access with better error handling and more fallback options
   const requestUserMedia = useCallback(async () => {
     try {
       setConnectionState('requesting-media');
       console.log('🎥 Requesting user media...');
+      mediaAttempts.current += 1;
+      
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Your browser does not support camera access');
+      }
+      
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const hasVideoDevice = devices.some(device => device.kind === 'videoinput');
+        const hasAudioDevice = devices.some(device => device.kind === 'audioinput');
+        
+        console.log('📱 Available devices:', {
+          video: hasVideoDevice ? 'Yes' : 'No',
+          audio: hasAudioDevice ? 'Yes' : 'No'
+        });
+        
+        if (!hasVideoDevice && !hasAudioDevice) {
+          throw new Error('No camera or microphone detected');
+        }
+      } catch (enumError) {
+        console.warn('⚠️ Could not enumerate devices:', enumError);
+      }
       
       const constraintOptions = [
         // Try HD quality first
@@ -124,6 +146,10 @@ const ConsultationRoom = () => {
         try {
           console.log(`🔄 Trying media constraint option ${i + 1}:`, constraintOptions[i]);
           
+          if (i > 0) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+          
           stream = await navigator.mediaDevices.getUserMedia(constraintOptions[i]);
           
           console.log('✅ Got media stream:', {
@@ -142,6 +168,11 @@ const ConsultationRoom = () => {
           if (err.name === 'NotAllowedError') {
             throw new Error('Camera/microphone access denied by user');
           }
+          
+          // Break early if security error (likely HTTPS requirement)
+          if (err.name === 'SecurityError') {
+            throw new Error('Camera access requires HTTPS connection');
+          }
         }
       }
       
@@ -152,6 +183,15 @@ const ConsultationRoom = () => {
       // Set up local video
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
+        
+        // Force play attempt
+        try {
+          await localVideoRef.current.play();
+          console.log('✅ Local video playing');
+        } catch (playError) {
+          console.warn('⚠️ Local video autoplay failed:', playError.message);
+          // Not critical for local video
+        }
       }
       
       setHasVideo(stream.getVideoTracks().length > 0);
@@ -163,12 +203,16 @@ const ConsultationRoom = () => {
     } catch (error) {
       console.error('❌ Media access denied:', error);
       setConnectionState('media-denied');
-      setError(`Camera access denied: ${error.message}`);
+      setCameraError(error.message);
+      
+      if (mediaAttempts.current >= 2) {
+        setError(`Camera access denied: ${error.message}. You can still use chat.`);
+      }
+      
       throw error;
     }
   }, []);
 
-  // FIXED: Simplified and more reliable video setup
   const setupVideoElement = useCallback((videoElement, stream, isLocal = false) => {
     if (!videoElement || !stream) {
       console.warn('⚠️ Cannot setup video: missing element or stream');
@@ -179,8 +223,14 @@ const ConsultationRoom = () => {
     
     try {
       // Clear existing source
-      videoElement.srcObject = null;
-      videoElement.pause();
+      if (videoElement.srcObject) {
+        try {
+          videoElement.pause();
+        } catch (e) {
+          console.warn('Could not pause video element:', e);
+        }
+        videoElement.srcObject = null;
+      }
       
       // Set properties
       videoElement.autoplay = true;
@@ -215,6 +265,15 @@ const ConsultationRoom = () => {
             console.log('📺 Local video stream set (autoplay blocked but video should show)');
             return true;
           }
+          
+          setTimeout(async () => {
+            try {
+              await videoElement.play();
+              console.log(`✅ ${isLocal ? 'Local' : 'Remote'} video playing (retry)`);
+            } catch (retryError) {
+              console.warn(`⚠️ ${isLocal ? 'Local' : 'Remote'} video autoplay failed on retry:`, retryError.message);
+            }
+          }, 1000);
           
           return false;
         }
@@ -360,17 +419,31 @@ const ConsultationRoom = () => {
     try {
       // Request camera/mic access
       setLoadingStatus('Requesting camera access...');
-      const stream = await requestUserMedia();
+      let stream;
+      
+      try {
+        stream = await requestUserMedia();
+      } catch (mediaError) {
+        console.error('❌ Media access failed:', mediaError);
+        if (!isChatMode) {
+          setIsChatMode(true);
+          setLoadingStatus('Chat-only mode activated');
+        }
+      }
       
       if (isCleaningUp.current) {
-        stream.getTracks().forEach(track => track.stop());
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
         return;
       }
       
-      // Set up local video
-      setLocalStream(stream);
-      if (localVideoRef.current) {
-        setupVideoElement(localVideoRef.current, stream, true);
+      // Set up local video if we got a stream
+      if (stream) {
+        setLocalStream(stream);
+        if (localVideoRef.current) {
+          setupVideoElement(localVideoRef.current, stream, true);
+        }
       }
       
       // Connect to signaling server
@@ -438,9 +511,9 @@ const ConsultationRoom = () => {
       // Handle incoming calls
       myPeer.on('call', (call) => {
         console.log('📞 Incoming call received');
-        call.answer(stream);
+        
+        call.answer(stream || null);
         setConnectionState('connected');
-        setIsConnected(true);
         
         call.on('stream', (userVideoStream) => {
           console.log('📹 Remote stream received');
@@ -449,6 +522,7 @@ const ConsultationRoom = () => {
           }
           setRemoteStream(userVideoStream);
           setHasRemoteVideo(userVideoStream.getVideoTracks().length > 0);
+          setIsConnected(true);
         });
         
         call.on('close', () => {
@@ -471,10 +545,12 @@ const ConsultationRoom = () => {
         const isDoctor = auth.currentUser?.uid === consultationData.doctorId;
         if (isDoctor) {
           setLoadingStatus('Initiating call...');
+          setCallAttempts(prev => prev + 1);
           
           setTimeout(() => {
             console.log('📞 Initiating call to:', userId);
-            const call = myPeer.call(userId, stream);
+            
+            const call = myPeer.call(userId, stream || null);
             peersRef.current[userId] = call;
             
             call.on('stream', (userVideoStream) => {
@@ -498,8 +574,29 @@ const ConsultationRoom = () => {
             call.on('error', (error) => {
               console.error('❌ Call error:', error);
               setError(`Call error: ${error.message}`);
+              
+              if (callAttempts <= 1) {
+                console.log('🔄 Retrying call after error...');
+                setTimeout(() => {
+                  if (peerRef.current) {
+                    const retryCall = peerRef.current.call(userId, stream || null);
+                    peersRef.current[userId] = retryCall;
+                    
+                    // Set up the same event handlers
+                    retryCall.on('stream', (userVideoStream) => {
+                      if (remoteVideoRef.current) {
+                        setupVideoElement(remoteVideoRef.current, userVideoStream, false);
+                      }
+                      setRemoteStream(userVideoStream);
+                      setHasRemoteVideo(userVideoStream.getVideoTracks().length > 0);
+                      setConnectionState('connected');
+                      setIsConnected(true);
+                    });
+                  }
+                }, 2000);
+              }
             });
-          }, 1000);
+          }, 2000); // Increased delay for better reliability
         } else {
           setLoadingStatus('Waiting for doctor to call...');
         }
@@ -524,13 +621,23 @@ const ConsultationRoom = () => {
       
       myPeer.on('error', (error) => {
         console.error('❌ PeerJS error:', error);
-        setError(`PeerJS error: ${error.message}. Switching to chat-only mode.`);
-        setIsChatMode(true);
-        setLoadingStatus('Chat-only mode activated');
+        
+        if (error.type === 'disconnected' && isConnected) {
+          setError(`PeerJS disconnected: ${error.message}. Trying to reconnect...`);
+          setTimeout(() => {
+            if (!isCleaningUp.current) {
+              handleConnectionRecovery();
+            }
+          }, 2000);
+        } else {
+          setError(`PeerJS error: ${error.message}. Switching to chat-only mode.`);
+          setIsChatMode(true);
+          setLoadingStatus('Chat-only mode activated');
+        }
       });
       
       // Set connection timeout
-      const initTimeoutRef = setTimeout(() => {
+      initTimeoutRef.current = setTimeout(() => {
         if (!isConnected && !isCleaningUp.current) {
           console.log('⏰ Connection timeout');
           setLoading(false);
@@ -545,12 +652,11 @@ const ConsultationRoom = () => {
       setCameraError(err.message);
       setIsChatMode(true);
       setLoadingStatus('Chat-only mode activated');
-      setLoading(false);
     } finally {
       isInitializing.current = false;
       setLoading(false);
     }
-  }, [roomId, requestUserMedia, setupVideoElement, isConnected]);
+  }, [roomId, requestUserMedia, setupVideoElement, isConnected, isChatMode, handleConnectionRecovery, callAttempts]);
 
   // Effect for fetching initial data and messages
   useEffect(() => {
