@@ -51,11 +51,11 @@ const ConsultationRoom = () => {
   const socketRef = useRef(null);
   const peersRef = useRef({});
   const isInitializing = useRef(false);
-  const pendingCandidates = useRef([]);
-  const hasRemoteDescription = useRef(false);
+  // const pendingCandidates = useRef([]);
+  // const hasRemoteDescription = useRef(false);
   const streamCleanupRef = useRef(null);
   const initTimeoutRef = useRef(null);
-  const offerTimeoutRef = useRef(null);
+  // const offerTimeoutRef = useRef(null);
   const isCleaningUp = useRef(false);
   const fileInputRef = useRef(null);
 
@@ -289,25 +289,6 @@ const ConsultationRoom = () => {
     console.log('✅ Cleanup complete');
   }, [localStream]);
 
-  const processPendingCandidates = useCallback(async () => {
-    if (!peerConnectionRef.current || !hasRemoteDescription.current) return;
-
-    console.log(`🧊 Processing ${pendingCandidates.current.length} pending candidates`);
-    
-    for (const candidate of pendingCandidates.current) {
-      try {
-        if (peerConnectionRef.current && peerConnectionRef.current.signalingState !== 'closed') {
-          await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-          console.log('✅ Added pending ICE candidate');
-        }
-      } catch (err) {
-        console.error('❌ Error adding pending candidate:', err);
-      }
-    }
-    
-    pendingCandidates.current = [];
-  }, []);
-
   const handleConnectionRecovery = useCallback(async () => {
     console.log('🔄 Attempting connection recovery...');
     
@@ -329,181 +310,6 @@ const ConsultationRoom = () => {
       setError('Failed to reconnect. Please refresh the page.');
     }
   }, [cleanup, consultation]);
-
-  const createPeerConnection = useCallback(() => {
-    console.log('🔧 Creating peer connection...');
-    
-    const configuration = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun4.l.google.com:19302' }
-      ],
-      iceCandidatePoolSize: 10
-    };
-
-    const pc = new RTCPeerConnection(configuration);
-    
-    // Add local stream tracks to peer connection
-    if (localStream) {
-      console.log('📤 Adding local stream tracks to peer connection');
-      localStream.getTracks().forEach(track => {
-        pc.addTrack(track, localStream);
-      });
-    }
-
-    // Handle ICE candidate events
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log('🧊 New ICE candidate:', event.candidate.type);
-        SignalingService.sendSignal({
-          type: 'ice-candidate',
-          candidate: event.candidate
-        });
-      }
-    };
-
-    // Handle ICE connection state changes
-    pc.oniceconnectionstatechange = () => {
-      console.log('🔄 ICE connection state:', pc.iceConnectionState);
-      setConnectionState(pc.iceConnectionState);
-      
-      // Handle disconnections
-      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-        console.warn('⚠️ ICE connection failed or disconnected');
-        setError('Connection lost. Attempting to reconnect...');
-        
-        // Attempt recovery
-        if (!isCleaningUp.current) {
-          handleConnectionRecovery();
-        }
-      }
-    };
-
-    // Handle signaling state changes
-    pc.onsignalingstatechange = () => {
-      console.log('🔄 Signaling state:', pc.signalingState);
-    };
-
-    // Handle connection state changes
-    pc.onconnectionstatechange = () => {
-      console.log('🔄 Connection state:', pc.connectionState);
-      
-      if (pc.connectionState === 'connected') {
-        setIsConnected(true);
-        setError('');
-      } else if (pc.connectionState === 'failed') {
-        setIsConnected(false);
-        setError('Connection failed. Please try again.');
-      }
-    };
-
-    // Handle remote stream
-    pc.ontrack = (event) => {
-      console.log('📥 Received remote track:', event.track.kind);
-      
-      if (event.streams && event.streams[0]) {
-        console.log('📥 Setting remote stream');
-        setRemoteStream(event.streams[0]);
-        setHasRemoteVideo(true);
-        
-        if (remoteVideoRef.current) {
-          setupVideoElement(remoteVideoRef.current, event.streams[0], false);
-        }
-      }
-    };
-
-    // Handle negotiation needed
-    pc.onnegotiationneeded = async () => {
-      console.log('🤝 Negotiation needed');
-      
-      if (pc.signalingState === 'stable' && !isCleaningUp.current) {
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          
-          SignalingService.sendSignal({
-            type: 'offer',
-            offer: pc.localDescription
-          });
-        } catch (err) {
-          console.error('❌ Error during negotiation:', err);
-        }
-      }
-    };
-
-    return pc;
-  }, [localStream, handleConnectionRecovery, setupVideoElement]);
-
-  const handleSignal = useCallback(async (data) => {
-    console.log('📨 Handling signal:', data.type || 'ice-candidate');
-    
-    if (!peerConnectionRef.current || isCleaningUp.current) {
-      console.warn('⚠️ No peer connection available or cleaning up');
-      return;
-    }
-
-    try {
-      const pc = peerConnectionRef.current;
-
-      if (data.offer) {
-        console.log('📥 Received offer');
-        
-        if (pc.signalingState !== 'stable') {
-          console.warn('⚠️ Signaling state not stable, waiting...');
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-        
-        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-        hasRemoteDescription.current = true;
-        
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        
-        SignalingService.sendSignal({
-          type: 'answer',
-          answer: pc.localDescription
-        });
-        
-        // Process any pending candidates
-        await processPendingCandidates();
-        
-      } else if (data.answer) {
-        console.log('📥 Received answer');
-        await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-        hasRemoteDescription.current = true;
-        
-        // Process any pending candidates
-        await processPendingCandidates();
-        
-      } else if (data.candidate) {
-        console.log('📥 Received ICE candidate');
-        
-        if (!hasRemoteDescription.current) {
-          console.log('⏳ Queuing ICE candidate');
-          pendingCandidates.current.push(data.candidate);
-          return;
-        }
-        
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (err) {
-          if (!pc.remoteDescription) {
-            console.log('⏳ Still queuing ICE candidate');
-            pendingCandidates.current.push(data.candidate);
-          } else {
-            console.warn('❌ Error adding ICE candidate:', err);
-          }
-        }
-      }
-      
-    } catch (err) {
-      console.error('❌ Error handling signal:', err);
-      setError('Connection error. Please try again.');
-    }
-  }, [processPendingCandidates]);
 
   const retryCamera = useCallback(async () => {
     console.log('🔄 Retrying camera access...');
