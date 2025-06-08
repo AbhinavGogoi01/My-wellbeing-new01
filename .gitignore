@@ -9,11 +9,7 @@
 /coverage
 
 # firebase-service-account-key
-src/forum_backend/forum/service-account.env
-
-src/forum_backend/config/firebase-service-account.json
-
-service-account.env
+firebase_service_account.env
 
 # misc
 .DS_Store
