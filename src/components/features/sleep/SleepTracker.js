@@ -478,15 +478,15 @@ function SleepTracker() {
     calculateSleepPhases();
 
     // Calculate weekly goal progress
-  //   calculateWeeklyProgress();
-  // }, [
-  //   sleepLogs,
-  //   sleepGoal,
-  //   reminderTime,
-  //   reminderEnabled,
-  //   darkMode,
-  //   healthConnections,
-  // ]);
+     calculateWeeklyProgress();
+   }, [
+     sleepLogs,
+     sleepGoal,
+     reminderTime,
+     reminderEnabled,
+     darkMode,
+     healthConnections,
+   ]);
 
   // Calculate duration when bedtime/wakeup changes
   useEffect(() => {
