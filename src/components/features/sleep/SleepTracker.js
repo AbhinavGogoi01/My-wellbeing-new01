@@ -1,5 +1,5 @@
 // src/components/features/sleepTracker/SleepTracker.js
-import { requestNotificationPermission, onMessageListener } from '../firebaseConfig';
+import { requestNotificationPermission, onMessageListener } from '../../../firebase/firebaseConfig';
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { saveAs } from "file-saver";
 import {
